@@ -1,0 +1,204 @@
+#!/bin/sh
+# \
+exec wish "$0" "$@"
+
+# Copyright 2005 (C) Peter LInich
+
+#==============================================================================
+# =============
+# Configuration
+# =============
+
+set debug_gui					0
+
+# -------------
+# Look and feel
+# -------------
+
+option add *Text.highlightThickness		0
+option add *Entry.highlightThickness		2
+option add *Entry.justify			center
+option add *Entry.disabledForeground		darkred
+option add *Entry.state				disabled
+option add *Entry.font				[font create -family courier]
+
+# --------------------------------
+# Remove unused GUI event bindings
+# --------------------------------
+foreach binding [bind Entry] {bind Entry $binding {}}
+foreach binding [bind Canvas] {bind Canvas $binding {}}
+foreach widget {Button Checkbutton} {
+	foreach binding [bind $widget] {
+		if {[string first "Key" $binding] != -1} {
+			bind $widget $binding {}
+		}
+	}
+}
+
+# $$$$$$$$$$$$$$$$$$
+# Check command line
+# $$$$$$$$$$$$$$$$$$
+foreach a $argv {
+	switch -exact -- $a {
+		"-f" -
+		"/f" {
+			set debug_gui 1
+		}
+		default {
+			puts stderr "Invalid option: \"$a\""
+			exit 1
+		}
+	}
+}
+
+#==============================================================================
+# ===================================
+# Reset - implements a hardware reset
+# ===================================
+
+proc Reset {} {
+
+	global io_pending key_present
+
+	# --------------------
+	# Clear 2650 registers
+	# --------------------
+	SetPSW ii 0
+	SetIAR 0
+
+	# ---------------------------
+	# Clear pending IO operations
+	# ---------------------------
+	set key_present 0
+	if {$io_pending != 0} {
+
+		global stop io_after
+
+		set io_pending 0
+
+		if {[info exists io_after]} {
+			after cancel $io_after
+			unset io_after
+		}
+
+		if {$stop == 0} {after idle Run}
+
+	} else {
+
+		# -------------------------------
+		# If no Run button present, clear
+		# stopped processor (eg. by Halt
+		# instruction)
+		# -------------------------------
+		global debug_gui
+		if {$debug_gui == 0} {
+
+			global stop
+			if {$stop != 0} {after idle Run}
+			set stop 0
+		}
+	}
+}
+
+#==============================================================================
+# ===================================================
+# Run - starts the 2650 from the current IAR location
+# ===================================================
+
+proc Run {} {
+
+	global stop io_pending opdispatch
+
+	# ---------------------------------
+	# Disable GUI controls while we run
+	# ---------------------------------
+	DisableRunTimeControls
+
+	# $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+	# Loop once per instruction till we stop for some reason
+	# $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+	while {1} {
+
+		set opcode [ReadMemory [set iar [GetIAR]]]
+		SetIAR [set iar [$opdispatch($opcode) $iar $opcode]]
+
+		# --------------------------------
+		# Stop running while IO is pending
+		# --------------------------------
+		if {$io_pending != 0} return
+
+		# ----------------
+		# Stop if stepping
+		# ----------------
+		if {$stop != 0} break
+
+		# -----------------------------------------
+		# Update the display after each instruction
+		# -----------------------------------------
+		update
+	}
+
+	# -----------------------------------
+	# Re-enable GUI controls when we stop
+	# -----------------------------------
+	EnableRunTimeControls
+}
+
+#==============================================================================
+# =====================================================
+# UndefinedOperation - is called when an unknown opcode
+# is encountered during execution
+# =====================================================
+
+proc UndefinedOperation {iar opcode} {
+
+	global stop
+	set stop 1
+	WriteDiagnostic "Unhandled op code: [format "%02x" $opcode] @ [format "%04x" $iar]"
+	return $iar
+}
+
+#==============================================================================
+# ==========================================
+# IncrPage - increments the given address by
+# the given increment (which defaults to 1)
+# while ensuring that we remain on the same
+# memory page. The result is returned
+# ==========================================
+
+proc IncrPage {addr {inc 1}} {
+
+	return [expr {($addr & 0x6000) | (($addr + $inc) & 0x1fff)}]
+}
+
+#==============================================================================
+# ==========================
+# Load the component modules
+# ==========================
+
+set libdir [file dirname $argv0]
+source [file join $libdir "source_macros.tcl"]
+
+MacroLoad [file join $libdir "rom.tcl"]
+MacroLoad [file join $libdir "dispatch.tcl"]
+
+MacroLoad [file join $libdir "psw.tcl"]
+MacroLoad [file join $libdir "memory.tcl"]
+MacroLoad [file join $libdir "register8.tcl"]
+MacroLoad [file join $libdir "register16.tcl"]
+MacroLoad [file join $libdir "terminal.tcl"]
+MacroLoad [file join $libdir "controls.tcl"]
+
+MacroLoad [file join $libdir "arith.tcl"]
+MacroLoad [file join $libdir "memref.tcl"]
+
+MacroLoad [file join $libdir "op_io.tcl"]
+MacroLoad [file join $libdir "op_psw.tcl"]
+MacroLoad [file join $libdir "op_misc.tcl"]
+MacroLoad [file join $libdir "op_store.tcl"]
+MacroLoad [file join $libdir "op_branch.tcl"]
+MacroLoad [file join $libdir "op_register.tcl"]
+
+MacroLoad [file join $libdir "init.tcl"]
+
+#==============================================================================
